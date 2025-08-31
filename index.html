@@ -15,6 +15,7 @@
         overflow: hidden;
         width: 100vw;
         height: 100vh;
+        background: #000;
       }
 
       /* 掃描UI */
@@ -165,7 +166,7 @@
         height: 100vh;
         z-index: 999;
         display: none;
-        background-color: rgba(0, 0, 0, 0.9);
+        background-color: rgba(0, 0, 0, 0.95);
         cursor: pointer;
       }
       #fullscreen-video-container.visible {
@@ -173,11 +174,42 @@
         align-items: center;
         justify-content: center;
       }
+      
+      /* 全像投影效果 */
       #fullscreen-video {
-        max-width: 100%;
-        max-height: 100%;
+        max-width: 90%;
+        max-height: 90%;
         width: auto;
         height: auto;
+        filter: contrast(1.2) brightness(1.1);
+        animation: hologramFlicker 0.1s infinite;
+      }
+      
+      @keyframes hologramFlicker {
+        0% { opacity: 0.95; }
+        50% { opacity: 1; }
+        100% { opacity: 0.98; }
+      }
+      
+      /* 全像投影光暈效果 */
+      .hologram-glow {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 120%;
+        height: 120%;
+        background: radial-gradient(ellipse at center, 
+          rgba(0, 255, 255, 0.1) 0%, 
+          rgba(0, 255, 255, 0.05) 40%, 
+          transparent 70%);
+        pointer-events: none;
+        animation: glowPulse 3s ease-in-out infinite;
+      }
+      
+      @keyframes glowPulse {
+        0%, 100% { opacity: 0.5; }
+        50% { opacity: 0.8; }
       }
     </style>
   </head>
@@ -217,6 +249,7 @@
     </div>
     
     <div id="fullscreen-video-container">
+      <div class="hologram-glow"></div>
       <video id="fullscreen-video" playsinline webkit-playsinline></video>
     </div>
 
@@ -253,23 +286,177 @@
         raycaster="far: 10000; objects: .clickable"
       ></a-camera>
 
+      <!-- 主要全像投影實體 -->
       <a-entity
         id="target0"
         mindar-image-target="targetIndex: 0"
-        data-target-aspect-ratio="1.414"
-        fit-video-to-target
+        hologram-container
       >
+        <!-- 影片平面 (使用透明材質) -->
         <a-video
           id="video0-entity"
           src="#video"
           position="0 0 0"
           rotation="0 0 0"
-          loop="true"
+          width="1"
+          height="0.707"
+          material="shader: hologram-shader; transparent: true; opacity: 0.85; blending: additive"
         ></a-video>
+        
+        <!-- 全像投影光暈效果 -->
+        <a-plane
+          position="0 0 -0.01"
+          width="1.3"
+          height="0.9"
+          material="shader: flat; color: #00ffff; opacity: 0.05; transparent: true; blending: additive"
+        ></a-plane>
+        
+        <!-- 掃描線效果 -->
+        <a-plane
+          id="scan-line"
+          position="0 0.35 0.01"
+          width="1"
+          height="0.02"
+          material="shader: flat; color: #00ffff; opacity: 0.3; transparent: true; blending: additive"
+          animation="property: position; from: 0 0.35 0.01; to: 0 -0.35 0.01; dur: 3000; loop: true; easing: linear"
+        ></a-plane>
+        
+        <!-- 粒子效果 -->
+        <a-entity
+          id="particles"
+          position="0 0 0"
+          particle-system="preset: dust; particleCount: 50; color: #00ffff,#00aaff; size: 0.3; opacity: 0.3; velocityValue: 0.001 0.001 0.001; velocitySpread: 0.5 0 0.5; accelerationValue: 0 -0.001 0; duration: 0; blending: 1"
+        ></a-entity>
+        
+        <!-- 邊框光效 -->
+        <a-box
+          position="0 0 0"
+          width="1.05"
+          height="0.74"
+          depth="0.001"
+          material="shader: flat; color: #00ffff; opacity: 0.1; transparent: true; wireframe: true"
+          animation="property: rotation; to: 0 360 0; dur: 60000; loop: true; easing: linear"
+        ></a-box>
       </a-entity>
     </a-scene>
 
     <script>
+      // 自定義全像投影著色器
+      AFRAME.registerShader('hologram-shader', {
+        schema: {
+          src: {type: 'map'},
+          transparent: {default: true},
+          opacity: {default: 0.85},
+          color: {type: 'color', default: '#00ffff'}
+        },
+        init: function (data) {
+          this.material = new THREE.ShaderMaterial({
+            uniforms: {
+              src: {value: data.src},
+              opacity: {value: data.opacity},
+              time: {value: 0},
+              color: {value: new THREE.Color(data.color)}
+            },
+            vertexShader: `
+              varying vec2 vUv;
+              varying vec3 vPosition;
+              void main() {
+                vUv = uv;
+                vPosition = position;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+              }
+            `,
+            fragmentShader: `
+              uniform sampler2D src;
+              uniform float opacity;
+              uniform float time;
+              uniform vec3 color;
+              varying vec2 vUv;
+              varying vec3 vPosition;
+              
+              void main() {
+                vec4 texture = texture2D(src, vUv);
+                
+                // 去除暗色背景
+                float luminance = dot(texture.rgb, vec3(0.299, 0.587, 0.114));
+                if (luminance < 0.15) {
+                  discard;
+                }
+                
+                // 添加全像投影色調
+                vec3 hologramColor = mix(texture.rgb, color, 0.3);
+                
+                // 添加掃描線效果
+                float scanLine = sin(vUv.y * 100.0 + time * 2.0) * 0.04;
+                hologramColor += vec3(scanLine);
+                
+                // 邊緣發光效果
+                float edgeGlow = 1.0 - abs(vUv.x - 0.5) * 2.0;
+                edgeGlow *= 1.0 - abs(vUv.y - 0.5) * 2.0;
+                edgeGlow = pow(edgeGlow, 3.0);
+                
+                // 閃爍效果
+                float flicker = sin(time * 30.0) * 0.03 + 0.97;
+                
+                gl_FragColor = vec4(hologramColor, opacity * luminance * flicker);
+                gl_FragColor.rgb += color * edgeGlow * 0.5;
+              }
+            `,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide
+          });
+          
+          // 更新時間 uniform 以產生動畫效果
+          const animate = () => {
+            if (this.material && this.material.uniforms) {
+              this.material.uniforms.time.value = performance.now() * 0.001;
+            }
+            requestAnimationFrame(animate);
+          };
+          animate();
+          
+          return this.material;
+        },
+        update: function (data) {
+          if (this.material) {
+            if (data.src) this.material.uniforms.src.value = data.src;
+            if (data.opacity) this.material.uniforms.opacity.value = data.opacity;
+            if (data.color) this.material.uniforms.color.value = new THREE.Color(data.color);
+          }
+        }
+      });
+
+      // 全像投影容器組件
+      AFRAME.registerComponent('hologram-container', {
+        init: function () {
+          this.el.addEventListener('targetFound', () => {
+            // 啟動粒子系統
+            const particles = this.el.querySelector('#particles');
+            if (particles) {
+              particles.components['particle-system'].startParticles();
+            }
+            
+            // 添加出現動畫
+            this.el.setAttribute('animation__appear', {
+              property: 'scale',
+              from: '0.8 0.8 0.8',
+              to: '1 1 1',
+              dur: 500,
+              easing: 'easeOutElastic'
+            });
+          });
+          
+          this.el.addEventListener('targetLost', () => {
+            // 停止粒子系統
+            const particles = this.el.querySelector('#particles');
+            if (particles && particles.components['particle-system']) {
+              particles.components['particle-system'].stopParticles();
+            }
+          });
+        }
+      });
+
       // 等待 A-Frame 載入
       if (window.AFRAME) {
         initApp();
@@ -281,23 +468,10 @@
       }
 
       function initApp() {
-        // 自動調整影片比例組件
-        AFRAME.registerComponent("fit-video-to-target", {
-          init: function () {
-            this.el.addEventListener("targetFound", () => {
-              const videoEntity = this.el.querySelector("a-video");
-              if (!videoEntity) return;
-              
-              const ratio = parseFloat(this.el.dataset.targetAspectRatio) || 1.0;
-              if (ratio > 0) {
-                videoEntity.setAttribute("geometry", {
-                  width: 1,
-                  height: 1 / ratio
-                });
-              }
-            });
-          }
-        });
+        // 載入粒子系統
+        const script = document.createElement('script');
+        script.src = 'https://cdn.jsdelivr.net/gh/supermedium/aframe-particle-system-component@1.1.3/dist/aframe-particle-system-component.min.js';
+        document.head.appendChild(script);
 
         // 主要元素
         const videoEl = document.querySelector("#video");
@@ -469,7 +643,7 @@
           }
         });
 
-        // 初始化音訊（需要用戶互動）
+        // 初始化音訊
         const initAudio = () => {
           if (!state.audioEnabled) return;
           toggleAudio();
